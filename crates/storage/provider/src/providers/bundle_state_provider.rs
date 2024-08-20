@@ -138,7 +138,7 @@ impl<SP: StateProvider, EDP: ExecutionDataProvider> StateRootProvider
             .account(&address)
             .map(|account| HashedStorage::from_bundle_state(account.status, &account.storage))
             .unwrap_or_else(|| HashedStorage::new(false));
-        storage.extend(hashed_storage);
+        storage.extend(&hashed_storage);
         self.state_provider.hashed_storage_root(address, storage)
     }
 }
