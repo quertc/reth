@@ -588,7 +588,7 @@ where
         cancun_fields: Option<CancunPayloadFields>,
     ) -> Result<TreeOutcome<PayloadStatus>, InsertBlockFatalError> {
         trace!(target: "engine", "invoked new payload");
-        self.metrics.new_payload_messages.increment(1);
+        self.metrics.engine.new_payload_messages.increment(1);
 
         // Ensures that the given payload does not violate any consensus rules that concern the
         // block's layout, like:
@@ -712,7 +712,7 @@ where
         attrs: Option<T::PayloadAttributes>,
     ) -> ProviderResult<TreeOutcome<OnForkChoiceUpdated>> {
         trace!(target: "engine", ?attrs, "invoked forkchoice update");
-        self.metrics.forkchoice_updated_messages.increment(1);
+        self.metrics.engine.forkchoice_updated_messages.increment(1);
         self.canonical_in_memory_state.on_forkchoice_update_received();
 
         if let Some(on_updated) = self.pre_validate_forkchoice_update(state)? {
@@ -881,7 +881,7 @@ where
             // Check if persistence has complete
             match rx.try_recv() {
                 Ok(last_persisted_block_hash) => {
-                    self.metrics.persistence_duration.record(start_time.elapsed());
+                    self.metrics.engine.persistence_duration.record(start_time.elapsed());
                     let Some(last_persisted_block_hash) = last_persisted_block_hash else {
                         // if this happened, then we persisted no blocks because we sent an
                         // empty vec of blocks
@@ -1004,7 +1004,7 @@ where
         // state house keeping after backfill sync
         // remove all executed blocks below the backfill height
         self.state.tree_state.remove_before(Bound::Included(backfill_height));
-        self.metrics.executed_blocks.set(self.state.tree_state.block_count() as f64);
+        self.metrics.engine.executed_blocks.set(self.state.tree_state.block_count() as f64);
 
         // remove all buffered blocks below the backfill height
         self.state.buffer.remove_old_blocks(backfill_height);
@@ -1114,7 +1114,7 @@ where
             }
 
             self.backfill_sync_state = BackfillSyncState::Pending;
-            self.metrics.pipeline_runs.increment(1);
+            self.metrics.engine.pipeline_runs.increment(1);
             debug!(target: "engine", "emitting backfill action event");
         }
 
@@ -1739,7 +1739,10 @@ where
         let block = block.unseal();
 
         let exec_time = Instant::now();
-        let output = executor.execute((&block, U256::MAX).into())?;
+        let output = self
+            .metrics
+            .executor
+            .metered((&block, U256::MAX).into(), |input| executor.execute(input))?;
         debug!(target: "engine", elapsed=?exec_time.elapsed(), ?block_number, "Executed block");
 
         self.consensus.validate_block_post_execution(
@@ -1781,7 +1784,7 @@ where
         }
 
         self.state.tree_state.insert_executed(executed);
-        self.metrics.executed_blocks.set(self.state.tree_state.block_count() as f64);
+        self.metrics.engine.executed_blocks.set(self.state.tree_state.block_count() as f64);
 
         // emit insert event
         let engine_event = if self.state.tree_state.is_fork(block_hash) {
