@@ -1,8 +1,12 @@
 //! clap [Args](clap::Args) for debugging purposes
 
-use clap::Args;
+use clap::{
+    builder::{PossibleValue, TypedValueParser},
+    Arg, Args, Command,
+};
 use reth_primitives::B256;
-use std::path::PathBuf;
+use std::{collections::HashSet, ffi::OsStr, fmt, path::PathBuf, str::FromStr};
+use strum::{AsRefStr, EnumIter, IntoStaticStr, ParseError, VariantArray, VariantNames};
 
 /// Parameters for debugging purposes
 #[derive(Debug, Clone, Args, PartialEq, Eq, Default)]
@@ -59,7 +63,230 @@ pub struct DebugArgs {
     /// will be written to specified location.
     #[arg(long = "debug.engine-api-store", help_heading = "Debug", value_name = "PATH")]
     pub engine_api_store: Option<PathBuf>,
+
+    /// Determines which type of bad block hook to install
+    ///
+    /// Example: `witness,prestate`
+    #[arg(long = "debug.bad-block-hook", help_heading = "Debug", value_parser = BadBlockSelectionValueParser::default())]
+    pub bad_block_hook: Option<BadBlockSelection>,
 }
+
+/// Describes the invalid block hooks that should be installed.
+///
+/// # Example
+///
+/// Create a [`BadBlockSelection`] from a selection.
+///
+/// ```
+/// use reth_node_core::args::debug::{BadBlockHook, BadBlockSelection};
+/// let config: BadBlockSelection = vec![BadBlockHook::Witness].into();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadBlockSelection(HashSet<BadBlockHook>);
+
+impl BadBlockSelection {
+    /// Creates a new _unique_ [`BadBlockSelection`] from the given items.
+    ///
+    /// # Note
+    ///
+    /// This will dedupe the selection and remove duplicates while preserving the order.
+    ///
+    /// # Example
+    ///
+    /// Create a selection from the [`BadBlockHook`] string identifiers
+    ///
+    /// ```
+    /// use reth_node_core::args::debug::{BadBlockHook, BadBlockSelection};
+    /// let selection = vec!["witness", "prestate", "opcode"];
+    /// let config = BadBlockSelection::try_from_selection(selection).unwrap();
+    /// assert_eq!(
+    ///     config,
+    ///     BadBlockSelection::from([
+    ///         BadBlockHook::Witness,
+    ///         BadBlockHook::PreState,
+    ///         BadBlockHook::Opcode
+    ///     ])
+    /// );
+    /// ```
+    ///
+    /// Create a unique selection from the [`BadBlockHook`] string identifiers
+    ///
+    /// ```
+    /// use reth_node_core::args::debug::{BadBlockHook, BadBlockSelection};
+    /// let selection = vec!["witness", "prestate", "opcode", "witness", "prestate"];
+    /// let config = BadBlockSelection::try_from_selection(selection).unwrap();
+    /// assert_eq!(
+    ///     config,
+    ///     BadBlockSelection::from([
+    ///         BadBlockHook::Witness,
+    ///         BadBlockHook::PreState,
+    ///         BadBlockHook::Opcode
+    ///     ])
+    /// );
+    /// ```
+    pub fn try_from_selection<I, T>(selection: I) -> Result<Self, T::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: TryInto<BadBlockHook>,
+    {
+        selection.into_iter().map(TryInto::try_into).collect()
+    }
+}
+
+impl From<Vec<BadBlockHook>> for BadBlockSelection {
+    fn from(s: Vec<BadBlockHook>) -> Self {
+        Self(s.into_iter().collect())
+    }
+}
+
+impl FromIterator<BadBlockHook> for BadBlockSelection {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = BadBlockHook>,
+    {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl FromStr for BadBlockSelection {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(Self(Default::default()))
+        }
+        let hooks = s.split(',').map(str::trim).peekable();
+        Self::try_from_selection(hooks)
+    }
+}
+
+impl fmt::Display for BadBlockSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]", self.0.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "))
+    }
+}
+
+/// clap value parser for [`BadBlockSelection`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+struct BadBlockSelectionValueParser;
+
+impl TypedValueParser for BadBlockSelectionValueParser {
+    type Value = BadBlockSelection;
+
+    fn parse_ref(
+        &self,
+        _cmd: &Command,
+        arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let val =
+            value.to_str().ok_or_else(|| clap::Error::new(clap::error::ErrorKind::InvalidUtf8))?;
+        val.parse::<BadBlockSelection>().map_err(|err| {
+            let arg = arg.map(|a| a.to_string()).unwrap_or_else(|| "...".to_owned());
+            let possible_values = BadBlockHook::all_variant_names().to_vec().join(",");
+            let msg = format!(
+                "Invalid value '{val}' for {arg}: {err}.\n    [possible values: {possible_values}]"
+            );
+            clap::Error::raw(clap::error::ErrorKind::InvalidValue, msg)
+        })
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        let values = BadBlockHook::all_variant_names().iter().map(PossibleValue::new);
+        Some(Box::new(values))
+    }
+}
+
+/// The type of bad block hook to install
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    AsRefStr,
+    IntoStaticStr,
+    VariantNames,
+    VariantArray,
+    EnumIter,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum BadBlockHook {
+    /// A witness value enum
+    Witness,
+    /// A prestate trace value enum
+    PreState,
+    /// An opcode trace value enum
+    Opcode,
+}
+
+impl FromStr for BadBlockHook {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "witness" => Self::Witness,
+            "prestate" => Self::PreState,
+            "opcode" => Self::Opcode,
+            _ => return Err(ParseError::VariantNotFound),
+        })
+    }
+}
+
+impl TryFrom<&str> for BadBlockHook {
+    type Error = ParseError;
+    fn try_from(s: &str) -> Result<Self, <Self as TryFrom<&str>>::Error> {
+        FromStr::from_str(s)
+    }
+}
+
+impl fmt::Display for BadBlockHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_ref())
+    }
+}
+
+impl BadBlockHook {
+    /// Returns all variant names of the enum
+    pub const fn all_variant_names() -> &'static [&'static str] {
+        <Self as VariantNames>::VARIANTS
+    }
+}
+
+// impl BadBlockHook {
+//     // TODO: should this be a function in its own crate?
+//     /// Returns the actual function for the desired type of hook.
+//     fn hook(&self) -> InvalidBlockHook {
+//         unimplemented!()
+//     }
+// }
+
+// /// Returns a function, which is itself an invalid block hook, that calls all of the provided
+// hooks /// in a loop for the same block.
+// pub fn hook_stack(hooks: Vec<BadBlockHook>) -> InvalidBlockHook {
+//     let new_hook = |block: SealedBlockWithSenders, parent: SealedHeader, exec_output:
+// BlockExecutionOutput<Receipt>, trie_updates: Option<(TrieUpdates, B256)>| {         for hook in
+// hooks {             let hook = hook.hook();
+//             (hook)(block, parent, exec_output, trie_updates)
+//         }
+//     }
+// }
+
+// TODO: impl various debug hooks somewhere (in this crate? would pull in lots of deps) and add a
+// way to:
+// * loop through multiple, run each trace
+// * map enum variant => fn
+//
+// Witness => witness_hook
+//
+// use reth_primitives::{Receipt, SealedBlockWithSenders, SealedHeader, B256};
+// use reth_provider::BlockExecutionOutput;
+// use reth_trie::TrieUpdates
+// fn witness_hook(block: SealedBlockWithSenders, parent: SealedHeader, exec_output:
+// BlockExecutionOutput<Receipt>, trie_updates: Option<(TrieUpdates, B256)>) {     todo!()
+// }
 
 #[cfg(test)]
 mod tests {
